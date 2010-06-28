@@ -314,27 +314,31 @@ class MagicEnvelopeProtocol(object):
     d = et.ElementTree()
     d._setroot(et.XML(textinput.strip()))
 
+    if d.getroot().tag == _ATOM_NS+'feed':
+        d._setroot(d.find(_ATOM_NS+'entry'))
+
+    data_el = None
     if d.getroot().tag == _ATOM_NS+'entry':
-      env_el = d.find(_ME_NS+'provenance')
-    elif d.getroot().tag == _ME_NS+'env':
-      env_el = d.getroot()
+      for el in d.findall(_ATOM_NS+'link'):
+          if el.get('rel').split(' ').count('alternate') > 0:
+              data_el = el
+              break
     else:
       raise ValueError('Unrecognized input format')
 
     def Squeeze(s):  # Remove all whitespace
       return re.sub(_WHITESPACE_RE, '', s)
 
-    data_el = env_el.find(_ME_NS+'data')
-
     # Pull magic envelope fields out into dict. Don't forget
     # to remove leading and trailing whitepace from each field's
     # data.
+    # TODO pull from actual PGP data once we're encoding that
     return dict (
-        data=Squeeze(data_el.text),
-        encoding=env_el.findtext(_ME_NS+'encoding'),
+        data=Squeeze(data_el.get('href').split('|',1)[0]),
+        encoding='rfc2397',
         data_type=data_el.get('type'),
-        alg=env_el.findtext(_ME_NS+'alg'),
-        sig=Squeeze(env_el.findtext(_ME_NS+'sig')),
+        alg='RSA-SHA256',
+        sig=Squeeze(data_el.get('href').split('|',1)[1]),
     )
 
 
@@ -520,21 +524,15 @@ class Envelope(object):
     else:
       template = ''
     template += """
-<me:env xmlns:me='http://salmon-protocol.org/ns/magic-env'>
-  <me:encoding>%s</me:encoding>
-  <me:data type='%s'>
-%s
-  </me:data>
-  <me:alg>%s</me:alg>
-  <me:sig>
-%s
-  </me:sig>
-</me:env>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <link type="%s" rel="alternate" href="%s|%s" />
+  </entry>
+</feed>
 """
-    text = template % (self._encoding, self._mime_type,
-                       _ToPretty(self._data, 4, 60),
-                       self._alg,
-                       _ToPretty(self._sig, 4, 60))
+    text = template % (self._mime_type,
+                       self._data,
+                       self._sig)
     indented_text = ''
     for line in text.strip().split('\n'):
       indented_text += ' '*indentation + line + '\n'
@@ -548,7 +546,7 @@ class Envelope(object):
       fulldoc: Return a full XML document with <?xml...
       indentation: Indent each line this number of spaces.
     Returns:
-      An Atom entry XML document with an me:provenance element
+      An Atom entry XML document with a link element
       containing the original magic signature data.
     """
     if not self._parsed_data:
@@ -558,18 +556,14 @@ class Envelope(object):
     assert d.getroot().tag == _ATOM_NS+'entry'
 
     # Create a provenance and add it in.
-    prov_el = et.Element(_ME_NS+'provenance')
-    data_el = et.SubElement(prov_el, _ME_NS+'data')
+    data_el = et.Element(_ATOM_NS+'link')
     data_el.set('type', self._data_type)
-    data_el.text = '\n'+_ToPretty(self._data, indentation+6, 60)
-    et.SubElement(prov_el, _ME_NS+'encoding').text = self._encoding
-    et.SubElement(prov_el, _ME_NS+'sig').text = '\n'+_ToPretty(
-                          self._protocol.EncodeData(self._sig, self._encoding),
-                          indentation+6,
-                          60)
+    data_el.set('rel', 'alternate')
+    data_el.set('href', self._data + '|' + \
+                self._protocol.EncodeData(self._sig, self._encoding))
 
     # Add in the provenance element:
-    d.getroot().append(prov_el)
+    d.getroot().append(data_el)
 
     # Prettify:
     self._PrettyIndent(d.getroot(), indentation/2)
