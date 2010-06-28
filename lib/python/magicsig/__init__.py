@@ -29,6 +29,8 @@ import base64
 import re
 import sys
 import time
+import urllib
+from Crypto.Util import number
 
 # ElementTree is standard with Python >=2.5, needs
 # environment support for 2.4 and lower.
@@ -190,7 +192,7 @@ class MagicEnvelopeProtocol(object):
     assert env['encoding'] == self.ENCODING
 
     # Decode data to text and grab the author:
-    text = base64.urlsafe_b64decode(env['data'].encode('utf-8'))
+    text = self.DecodeData(env['data'].encode('utf-8'), env['encoding'])
     signer_uri = self.GetSignerURI(text)
 
     verifier = magicsigalg.SignatureAlgRsaSha256(self.GetKeypair(signer_uri))
@@ -228,7 +230,7 @@ class MagicEnvelopeProtocol(object):
     # TODO(jpanzer): Massage public_key into appropriate format if needed.
     return magicsigalg.SignatureAlgRsaSha256(public_key)
 
-  def EncodeData(self, raw_text_data, encoding):
+  def EncodeData(self, raw_text_data, encoding, mime_type=None):
     """Encodes raw data into an armored form.
 
     Args:
@@ -239,11 +241,18 @@ class MagicEnvelopeProtocol(object):
     Returns:
       The encoded data in the specified format.
     """
-    if encoding != 'base64url':
-      raise ValueError('Unknown encoding %s' % encoding)
+    if not mime_type:
+        mime_type = 'application/octet-stream'
+    if isinstance(raw_text_data, long):
+        raw_text_data = number.long_to_bytes(raw_text_data)
 
-    return base64.urlsafe_b64encode(
-        unicode(raw_text_data).encode('utf-8')).encode('utf-8')
+    if encoding == 'base64url':
+        return base64.urlsafe_b64encode(raw_text_data).encode('utf-8')
+    elif encoding == 'rfc2397':
+        return ('data:' + mime_type + ';base64,' + \
+            base64.standard_b64encode(raw_text_data)).encode('utf-8')
+    else:
+      raise ValueError('Unknown encoding %s' % encoding)
 
   def DecodeData(self, encoded_text_data, encoding):
     """Decodes armored data into raw text form.
@@ -256,9 +265,16 @@ class MagicEnvelopeProtocol(object):
     Returns:
       The raw decoded text as a string.
     """
-    if encoding != 'base64url':
+    if encoding == 'base64url':
+        return base64.urlsafe_b64decode(encoded_text_data.encode('utf-8'))
+    elif encoding == 'rfc2397':
+        parts = encoded_text_data.encode('utf-8').split(',', 1)
+        if parts[0].split(';')[-1:][0] == 'base64':
+            return base64.standard_b64decode(parts[1])
+        else:
+            return urllib.unquote(parts[1])
+    else:
       raise ValueError('Unknown encoding %s' % encoding)
-    return base64.urlsafe_b64decode(encoded_text_data.encode('utf-8'))
 
   def ParseData(self, raw_text_data, mime_type):
     """Parses the payload of a magic envelope's data field.
@@ -383,7 +399,7 @@ class Envelope(object):
   def _Initialize(self, kwargs):
     """Initializes envelope data from input."""
     # Input from serialized text document if provided:
-    self._mime_type = kwargs.get('mime_type', None)
+    self._mime_type = kwargs.get('mime_type', 'application/atom+xml')
     self._document = kwargs.get('document', None)
 
     if self._document:
@@ -394,9 +410,11 @@ class Envelope(object):
     # Pull structured data from kwargs and sanity check:
     self._data = kwargs.get('data', None)
     self._data_type = kwargs.get('data_type', None)
-    self._encoding = kwargs.get('encoding', 'base64url')
+    self._encoding = kwargs.get('encoding', 'rfc2397')
     self._alg = kwargs.get('alg', 'RSA-SHA256')
     self._sig = kwargs.get('sig', None)
+    if self._sig and not isinstance(self._sig, long):
+        self._sig = self._protocol.DecodeData(self._sig, self._encoding)
 
     # Sanity checks:
     if not self._data_type:
@@ -404,7 +422,7 @@ class Envelope(object):
     if self._alg != 'RSA-SHA256':
       raise EnvelopeError(self, 'Unknown alg %s; must be RSA-SHA256' %
                           self._alg)
-    if self._encoding != 'base64url':
+    if self._encoding != 'base64url' and self._encoding != 'rfc2397':
       raise EnvelopeError(self, 'Unknown encoding %s; must be base64url' %
                           self._encoding)
 
@@ -420,7 +438,8 @@ class Envelope(object):
       self._parsed_data = self._protocol.ParseData(raw_data,
                                                    self._data_type)
       self._data = self._protocol.EncodeData(raw_data,
-                                             self._encoding)
+                                             self._encoding,
+                                             self._mime_type)
       self._signer_uri = kwargs['signer_uri']
       self._signer_key = kwargs['signer_key']
     elif self._sig:
@@ -452,12 +471,14 @@ class Envelope(object):
     assert self._protocol.IsAllowedSigner(self._parsed_data, self._signer_uri)
 
     signature_alg = self._protocol.GetSigningAlg(self._signer_key)
-    self._sig = signature_alg.Sign(self._data)
+    self._sig = self._protocol.EncodeData(signature_alg.Sign(self._data),
+                    self._encoding)
     self._alg = signature_alg.GetName()
 
     # Hmm.  This seems like a no-brainer assert but what if you're
     # signing something with a not-yet-published public key?
-    assert signature_alg.Verify(self._data, self._sig)
+    assert signature_alg.Verify(self._data,
+               self._protocol.DecodeData(self._sig, self._encoding))
 
     # TODO(jpanzer): Clear private key data from object?
 
@@ -465,7 +486,7 @@ class Envelope(object):
     """Performs signature verification on parsed data."""
     # Decode data to text, cache parsed representation,
     # and find the key to use:
-    text = base64.urlsafe_b64decode(self._data.encode('utf-8'))
+    text = self._protocol.DecodeData(self._data.encode('utf-8'), self._encoding)
     self._parsed_data = self._protocol.ParseData(text, self._data_type)
     self._signer_uri = self._protocol.GetSignerURI(self._parsed_data)
     self._signer_public_key = self._protocol.GetPublicKey(self._signer_uri)
@@ -501,7 +522,7 @@ class Envelope(object):
     template += """
 <me:env xmlns:me='http://salmon-protocol.org/ns/magic-env'>
   <me:encoding>%s</me:encoding>
-  <me:data type='application/atom+xml'>
+  <me:data type='%s'>
 %s
   </me:data>
   <me:alg>%s</me:alg>
@@ -510,7 +531,7 @@ class Envelope(object):
   </me:sig>
 </me:env>
 """
-    text = template % (self._encoding,
+    text = template % (self._encoding, self._mime_type,
                        _ToPretty(self._data, 4, 60),
                        self._alg,
                        _ToPretty(self._sig, 4, 60))
@@ -542,9 +563,10 @@ class Envelope(object):
     data_el.set('type', self._data_type)
     data_el.text = '\n'+_ToPretty(self._data, indentation+6, 60)
     et.SubElement(prov_el, _ME_NS+'encoding').text = self._encoding
-    et.SubElement(prov_el, _ME_NS+'sig').text = '\n'+_ToPretty(self._sig,
-                                                               indentation+6,
-                                                               60)
+    et.SubElement(prov_el, _ME_NS+'sig').text = '\n'+_ToPretty(
+                          self._protocol.EncodeData(self._sig, self._encoding),
+                          indentation+6,
+                          60)
 
     # Add in the provenance element:
     d.getroot().append(prov_el)

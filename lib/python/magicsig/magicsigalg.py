@@ -26,6 +26,7 @@ __author__ = 'jpanzer@google.com (John Panzer)'
 
 import base64
 import re
+import logging
 
 # PyCrypto: Note that this is not available in the
 # downloadable GAE SDK, must be installed separately.
@@ -216,19 +217,14 @@ class SignatureAlgRsaSha256(object):
     # Compute the signature:
     signature_long = self.keypair.sign(emsa_msg, None)[0]
 
-    # Encode the signature as armored text:
-    signature_bytes = number.long_to_bytes(signature_long)
+    return signature_long
 
-    self._Log(logf, 'signature_bytes = [%s]' % signature_bytes.encode('hex'))
-
-    return base64.urlsafe_b64encode(signature_bytes).encode('utf-8')
-
-  def Verify(self, signed_bytes, signature_b64):
+  def Verify(self, signed_bytes, signature):
     """Determines the validity of a signature over a signed buffer of bytes.
 
     Args:
       signed_bytes: string The buffer of bytes the signature_b64 covers.
-      signature_b64: string The putative signature, base64-encoded, to check.
+      signature: string The putative signature to check.
     Returns:
       True if the request validated, False otherwise.
     """
@@ -238,8 +234,10 @@ class SignatureAlgRsaSha256(object):
                                            self.keypair.size())
 
     # Get putative signature:
-    putative_signature = base64.urlsafe_b64decode(signature_b64.encode('utf-8'))
-    putative_signature = number.bytes_to_long(putative_signature)
+    if isinstance(signature, long):
+        putative_signature = signature
+    else:
+        putative_signature = number.bytes_to_long(signature)
 
     # Verify signature given public key:
     return self.keypair.verify(emsa_msg, (putative_signature,))
