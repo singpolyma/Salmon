@@ -251,6 +251,10 @@ class MagicEnvelopeProtocol(object):
     elif encoding == 'rfc2397':
         return ('data:' + mime_type + ';base64,' + \
             base64.standard_b64encode(raw_text_data)).encode('utf-8')
+    elif encoding == 'raw':
+        if isinstance(raw_text_data, unicode):
+            return raw_text_data.encode('utf-8')
+        return raw_text_data
     else:
       raise ValueError('Unknown encoding %s' % encoding)
 
@@ -273,6 +277,8 @@ class MagicEnvelopeProtocol(object):
             return base64.standard_b64decode(parts[1])
         else:
             return urllib.unquote(parts[1])
+    elif encoding == 'raw':
+        return encoded_text_data
     else:
       raise ValueError('Unknown encoding %s' % encoding)
 
@@ -426,7 +432,8 @@ class Envelope(object):
     if self._alg != 'RSA-SHA256':
       raise EnvelopeError(self, 'Unknown alg %s; must be RSA-SHA256' %
                           self._alg)
-    if self._encoding != 'base64url' and self._encoding != 'rfc2397':
+    if self._encoding != 'base64url' and self._encoding != 'rfc2397' \
+       and self._encoding != 'raw':
       raise EnvelopeError(self, 'Unknown encoding %s; must be base64url' %
                           self._encoding)
 
@@ -500,8 +507,13 @@ class Envelope(object):
 
     # Check whether the signature verifies; if not, abandon
     # this envelope.
-    if not verifier.Verify(self._data, self._sig):
+    if not verifier.verify(self._sig):
       raise EnvelopeError(self, 'Signature verification failed.')
+
+  def ToBytes(self):
+    """Outputs raw serialization of envelope"""
+    assert self._init_timestamp  # Object must be successfully initialized
+    return self._protocol.DecodeData(self._sig, self._encoding)
 
   def ToXML(self, fulldoc=True, indentation=0):
     """Turns envelope into serialized XML suitable for transmission.
