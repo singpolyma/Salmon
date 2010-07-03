@@ -75,7 +75,8 @@ class SignThisHandler(webapp.RequestHandler):
 
     # TODO: Verify that current user session matches author of content, or throw
     data = self.request.get('data')
-    envText = self.request.get('env')
+    # HACK paired decode to hack encode
+    envText = base64.b16decode(self.request.get('env'))
     format = self.request.get('format') or 'magic-envelope'
     if data:
       logging.info('posted Atom data = %s\n',data)
@@ -99,15 +100,20 @@ class SignThisHandler(webapp.RequestHandler):
     elif envText:
       logging.info('posted Magic envelope env = %s\n',envText)
       envelope = magicsig.Envelope(document=envText,
-                                   mime_type='applicaton/magic-envelope+xml')
+                                   mime_type='application/pgp-encrypted')
       #env = self.magicenv.Parse(envText)
 
     logging.info('Created magic envelope: \n%s\n' % envelope)
 
     self.response.set_status(200) # The default
-    if format == 'magic-envelope':
-      self.response.out.write(envelope.ToXML())
+    if format == 'pgp':
+      self.response.headers['Content-Type'] = 'application/pgp-encrypted'
+      # Someone eats binary data on the way down and back up, not sure if it's
+      # AppEngine or jQuery or I'm just doing it wrong. Anyway, this works for
+      # now. -- HACK
+      self.response.out.write(base64.b16encode(envelope.ToBytes()))
     elif format == 'atom':
+      #self.response.headers['Content-Type'] = 'application/atom+xml; charset=utf-8'
       self.response.out.write(envelope.ToAtom())
     else:
       self.response.set_status(400)
@@ -122,12 +128,15 @@ class VerifyThisHandler(webapp.RequestHandler):
   def post(self):
     """  Intended to be called via XHR from magicsigdemo.html. """
     logging.error('MagicSigDemoVerify post')
-    data = self.request.get('data').strip()
+    data = self.request.get('data')
+    # HACK paired decode to hack encode
+    if self.request.get('mime') == 'application/pgp-encrypted':
+      data = base64.b16decode(data)
     logging.info('The data = %s\n',data)
-    env = self.magicenv.Parse(data)
+    env = self.magicenv.Parse(data, self.request.get('mime'))
     try:
       envelope = magicsig.Envelope(document=data,
-                                   mime_type='application/magic-envelope+xml')
+                                   mime_type=self.request.get('mime'))
       self.response.set_status(200) # The default
       self.response.out.write("OK")
       logging.info("SPLASH! Salmon signature verified!")

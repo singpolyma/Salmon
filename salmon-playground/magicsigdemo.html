@@ -36,14 +36,14 @@
   </form>
 </div>
 <div>
-  <p>The application/magic-envelope format (to be sent upstream):</p>
+  <p>The application/pgp-encrypted format (to be sent upstream, shown escaped, true data is binary):</p>
   <a title="Unfold magic envelope into signed Atom" href="javascript:unfoldatomxml($('#envelope').val())">Unfold into Atom</a> |
-  <a title="Send salmon to server to verify signature" href="javascript:verifyxml($('#envelope').val())">Verify signature</a><BR>
+  <a title="Send salmon to server to verify signature" href="javascript:verifyxml($('#envelope').val(),'application/pgp-encrypted')">Verify signature</a><BR>
   <TEXTAREA id='envelope' rows=6 cols=120></TEXTAREA>
 </div>
 <div id="output">
-  <p>The application/atom format (to be used for re-syndication):</p>
-  <a title="Send salmon to server to verify signature" href="javascript:verifyxml($('#signedAtom').val())">Verify signature</a><BR>
+  <p>The application/atom+xml format (to be used for re-syndication):</p>
+  <a title="Send salmon to server to verify signature" href="javascript:verifyxml($('#signedAtom').val(),'application/atom+xml')">Verify signature</a><BR>
   <TEXTAREA id='signedAtom' rows=6 cols=120></TEXTAREA>
 </div>
 <script>
@@ -54,10 +54,10 @@ function updatexml(text) {
   $('#envelope').val('working...');
   $.ajax({
     type: "POST",
-    url: "/magicsigdemo?format=magic-envelope",
+    url: "/magicsigdemo?format=pgp",
     data: "data="+encodeURIComponent(text),
     success: function(response){
-      $('#envelope').val(response); 
+      $('#envelope').val(response);
       $('#output').fadeOut();
       $('#signedAtom').val('')
       showStatusAndHideAfterFiveSecs("Updated the signed magic envelope.");
@@ -87,12 +87,13 @@ function unfoldatomxml(text) {
 }
 
 // Verify a (signed) Salmon and return yes or no:
-function verifyxml(text) {
+function verifyxml(text, mime) {
   showStatus("Verifying...")
+  // This is silly. Should use Content-Type header and post as body
   $.ajax({
     type: "POST",
     url: "/magicsigdemoverify",
-    data: "data="+encodeURIComponent(text),
+    data: "mime="+encodeURIComponent(mime)+"&data="+encodeURIComponent(text),
     success: function(response){
       if (response == "OK") {
         showStatusAndHideAfterFiveSecs("Salmon signature verified!");
