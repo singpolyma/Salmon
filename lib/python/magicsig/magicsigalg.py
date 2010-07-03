@@ -90,154 +90,50 @@ _KEY_RE = re.compile(
     re.VERBOSE)
 
 
-# Implementation of the Magic Envelope signature algorithm
-class SignatureAlgRsaSha256(object):
-  """Signature algorithm for RSA-SHA256 Magic Envelope."""
+def RSAToString(keypair, full_key_pair=True):
+  """Serializes key to a safe string storage format.
 
-  def __init__(self, rsa_key):
-    """Initializes algorithm with key information.
+  Args:
+    keypair: An RSAobj
+    full_key_pair: Whether to save the private key portion as well.
+  Returns:
+    The string representation of the key in the format:
 
-    Args:
-      rsa_key: Key in either string form or a tuple in the
-               format expected by Crypto.PublicKey.RSA.
-    Raises:
-      ValueError: The input format was incorrect.
-    """
-    if isinstance(rsa_key, tuple):
-      self.keypair = Crypto.PublicKey.RSA.construct(rsa_key)
-    else:
-      self._InitFromString(rsa_key)
+      RSA.mod.exp[.optional_private_exp]
 
-  def ToString(self, full_key_pair=True):
-    """Serializes key to a safe string storage format.
+    Each component is a urlsafe-base64 encoded representation of
+    the corresponding RSA key field.
+  """
+  mod = _NumToB64(keypair.n)
+  exp = '.' + _NumToB64(keypair.e)
+  private_exp = ''
+  if full_key_pair and keypair.d:
+    private_exp = '.' + _NumToB64(keypair.d)
+  return 'RSA.' + mod + exp + private_exp
 
-    Args:
-      full_key_pair: Whether to save the private key portion as well.
-    Returns:
-      The string representation of the key in the format:
+def RSAFromString(text):
+  """Parses key from a standard string storage format.
 
-        RSA.mod.exp[.optional_private_exp]
+  Args:
+    text: The key in text form.  See ToString for description
+      of expected format.
+  Raises:
+    ValueError: The input format was incorrect.
+  """
+  # First, remove all whitespace:
+  text = re.sub(_WHITESPACE_RE, '', text)
 
-      Each component is a urlsafe-base64 encoded representation of
-      the corresponding RSA key field.
-    """
-    mod = _NumToB64(self.keypair.n)
-    exp = '.' + _NumToB64(self.keypair.e)
-    private_exp = ''
-    if full_key_pair and self.keypair.d:
-      private_exp = '.' + _NumToB64(self.keypair.d)
-    return 'RSA.' + mod + exp + private_exp
+  # Parse out the period-separated components
+  match = _KEY_RE.match(text)
+  if not match:
+    raise ValueError('Badly formatted key string: "%s"', text)
 
-  def _InitFromString(self, text):
-    """Parses key from a standard string storage format.
-
-    Args:
-      text: The key in text form.  See ToString for description
-        of expected format.
-    Raises:
-      ValueError: The input format was incorrect.
-    """
-    # First, remove all whitespace:
-    text = re.sub(_WHITESPACE_RE, '', text)
-
-    # Parse out the period-separated components
-    match = _KEY_RE.match(text)
-    if not match:
-      raise ValueError('Badly formatted key string: "%s"', text)
-
-    private_exp = match.group('private_exp')
-    if private_exp:
-      private_exp = _B64ToNum(private_exp)
-    else:
-      private_exp = None
-    self.keypair = Crypto.PublicKey.RSA.construct(
-        (_B64ToNum(match.group('mod')),
-         _B64ToNum(match.group('exp')),
-         private_exp))
-
-  def GetName(self):
-    """Returns string identifier for algorithm used."""
-    return 'RSA-SHA256'
-
-  def _MakeEmsaMessageSha256(self, msg, modulus_size, logf=None):
-    """Algorithm EMSA_PKCS1-v1_5 from PKCS 1 version 2.
-
-    This is derived from keyczar code, and implements the
-    additional ASN.1 compatible magic header bytes and
-    padding needed to implement PKCS1-v1_5.
-
-    Args:
-      msg: The message to sign.
-      modulus_size: The size of the key (in bits) used.
-    Returns:
-      The byte sequence of the message to be signed.
-    """
-    magic_sha256_header = [0x30, 0x31, 0x30, 0xd, 0x6, 0x9, 0x60, 0x86, 0x48,
-                           0x1, 0x65, 0x3, 0x4, 0x2, 0x1, 0x5, 0x0, 0x4, 0x20]
-
-    hash_of_msg = hashlib.sha256(msg).digest() #???
-
-    self._Log(logf, 'sha256 digest of msg %s: [%s]' % (msg, hash_of_msg.encode('hex')))
-
-    encoded = ''.join([chr(c) for c in magic_sha256_header]) + hash_of_msg
-
-    msg_size_bits = modulus_size + 8-(modulus_size % 8)  # Round up to next byte
-
-    pad_string = chr(0xFF) * (msg_size_bits / 8 - len(encoded) - 3)
-    return chr(0) + chr(1) + pad_string + chr(0) + encoded
-
-  def _Log(self, logf, s):
-    """Append message to log if log exists."""
-    if logf:
-      logf(s + '\n')
-
-  def Sign(self, bytes_to_sign, logf=None):
-    """Signs the bytes using PKCS-v1_5.
-
-    Args:
-      bytes_to_sign: The bytes to be signed.
-    Returns:
-      The signature in base64url encoded format.
-    """
-    # Implements PKCS1-v1_5 w/SHA256 over the bytes, and returns
-    # the result as a base64url encoded bignum.
-
-    self._Log(logf, 'bytes_to_sign = [%s]' % bytes_to_sign.encode('hex'))
-
-    self._Log(logf, 'keypair size : %s' % self.keypair.size())
-
-    # Generate the PKCS1-v1_5 compatible message, which includes
-    # magic ASN.1 bytes and padding:
-    emsa_msg = self._MakeEmsaMessageSha256(bytes_to_sign, self.keypair.size(), logf)
-    # TODO(jpanzer): Check whether we need to use max keysize above
-    # or just keypair.size
-
-    self._Log(logf, 'emsa_msg = [%s]' % emsa_msg.encode('hex'))
-
-    # Compute the signature:
-    signature_long = self.keypair.sign(emsa_msg, None)[0]
-
-    return signature_long
-
-  def Verify(self, signed_bytes, signature):
-    """Determines the validity of a signature over a signed buffer of bytes.
-
-    Args:
-      signed_bytes: string The buffer of bytes the signature_b64 covers.
-      signature: string The putative signature to check.
-    Returns:
-      True if the request validated, False otherwise.
-    """
-    # Generate the PKCS1-v1_5 compatible message, which includes
-    # magic ASN.1 bytes and padding:
-    emsa_msg = self._MakeEmsaMessageSha256(signed_bytes,
-                                           self.keypair.size())
-
-    # Get putative signature:
-    if isinstance(signature, long):
-        putative_signature = signature
-    else:
-        putative_signature = number.bytes_to_long(signature)
-
-    # Verify signature given public key:
-    return self.keypair.verify(emsa_msg, (putative_signature,))
+  private_exp = match.group('private_exp')
+  if private_exp:
+    private_exp = _B64ToNum(private_exp)
+  else:
+    private_exp = None
+  return Crypto.PublicKey.RSA.construct(
+      (_B64ToNum(match.group('mod')),
+       _B64ToNum(match.group('exp')),
+        private_exp))
