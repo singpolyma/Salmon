@@ -30,6 +30,8 @@ import re
 import sys
 import time
 import urllib
+import OpenPGP
+import OpenPGP.Crypto
 from Crypto.Util import number
 
 # ElementTree is standard with Python >=2.5, needs
@@ -41,9 +43,6 @@ except ImportError:
     import elementtree as et  # Allow local path override
   except ImportError:
     raise
-
-import magicsigalg
-
 
 _WHITESPACE_RE = re.compile(r'\s+')
 
@@ -101,11 +100,7 @@ class KeyRetriever(object):
     # TODO(jpanzer): Really look this up with Webfinger.
     if not signer_uri:
       return None
-    return  ('RSA.mVgY8RN6URBTstndvmUUPb4UZTdwvwmddSKE5z_jvKUEK6yk1'
-             'u3rrC9yN8k6FilGj9K0eeUPe2hf4Pj-5CmHww=='
-             '.AQAB'
-             '.Lgy_yL3hsLBngkFdDw1Jy9TmSRMiH6yihYetQ8jy-jZXdsZXd8V5'
-             'ub3kuBHHk4M39i3TduIkcrjcsiWQb77D8Q==')
+    return (8031283789075196565022891546563591368344944062154100509645398892293433370859891943306439907454883747534493461257620351548796452092307094036643522661681091, 65537, 2411823798049787808355822337426462024816467706597110824882602127030945300698688657448540895366210592380576050280953899102635751538748696981555132000814065)
 
   def LookupPrivateKey(self, signer_uri):
     """Look up signing key for a given signer URI."""
@@ -130,7 +125,7 @@ __register_namespace('thr', 'http://purl.org/syndication/thread/1.0')
 class MagicEnvelopeProtocol(object):
   """Implementation of Magic Envelope protocol."""
 
-  ENCODING = 'base64url'  # This is a constant for now.
+  ENCODING = 'rfc2397'  # This is a constant for now.
   key_retriever = KeyRetriever()
 
   def GetPrivateKey(self, signer_uri):
@@ -188,16 +183,16 @@ class MagicEnvelopeProtocol(object):
     Returns:
       True iff the signature is verified.
     """
-    assert env['alg'] == 'RSA-SHA256'
+    assert env['alg'].split('-')[0] == 'RSA'
     assert env['encoding'] == self.ENCODING
 
     # Decode data to text and grab the author:
     text = self.DecodeData(env['data'].encode('utf-8'), env['encoding'])
     signer_uri = self.GetSignerURI(text)
 
-    verifier = magicsigalg.SignatureAlgRsaSha256(self.GetKeypair(signer_uri))
+    verifier = OpenPGP.Crypto.RSA(self.GetKeypair(signer_uri))
 
-    return verifier.Verify(env['data'], env['sig'])
+    return verifier.verify(env)
 
   def GetSigningAlg(self, signing_key):
     """Returns algorithm to use for signing messages.
@@ -211,13 +206,9 @@ class MagicEnvelopeProtocol(object):
 
     # Use standard test key if testing:
     if signing_key == 'TEST':
-      signing_key =  ('RSA.mVgY8RN6URBTstndvmUUPb4UZTdwvwmddSKE5z_jvKUEK6yk1'
-                      'u3rrC9yN8k6FilGj9K0eeUPe2hf4Pj-5CmHww=='
-                      '.AQAB'
-                      '.Lgy_yL3hsLBngkFdDw1Jy9TmSRMiH6yihYetQ8jy-jZXdsZXd8V5'
-                      'ub3kuBHHk4M39i3TduIkcrjcsiWQb77D8Q==')
+      signing_key = (8031283789075196565022891546563591368344944062154100509645398892293433370859891943306439907454883747534493461257620351548796452092307094036643522661681091, 65537, 2411823798049787808355822337426462024816467706597110824882602127030945300698688657448540895366210592380576050280953899102635751538748696981555132000814065)
 
-    return magicsigalg.SignatureAlgRsaSha256(signing_key)
+    return OpenPGP.Crypto.RSA(signing_key)
 
   def GetVerifierAlg(self, public_key):
     """Returns algorithm to use for verifying messages.
@@ -228,14 +219,14 @@ class MagicEnvelopeProtocol(object):
       An algorithm object that can be used to sign byte sequences.
     """
     # TODO(jpanzer): Massage public_key into appropriate format if needed.
-    return magicsigalg.SignatureAlgRsaSha256(public_key)
+    return OpenPGP.Crypto.RSA(public_key)
 
   def EncodeData(self, raw_text_data, encoding, mime_type=None):
     """Encodes raw data into an armored form.
 
     Args:
       raw_text_data: Textual data to be encoded; should be in utf-8 form.
-      encoding: Encoding to use (must be base64url)
+      encoding: Encoding to use
     Raises:
       ValueError: The encoding is unknown or missing.
     Returns:
@@ -301,11 +292,11 @@ class MagicEnvelopeProtocol(object):
 
     return d
 
-  def Parse(self, textinput, mime_type='application/magic-envelope+xml'):
+  def Parse(self, textinput, mime_type='application/atom+xml'):
     """Parses a magic envelope.
 
     Args:
-      textinput: Input message in either application/magic-envelope
+      textinput: Input message in either application/pgp-encrypted
         or application/atom format.
       mime_type: MIME type of textinput data.
     Raises:
@@ -313,40 +304,41 @@ class MagicEnvelopeProtocol(object):
     Returns:
       Magic envelope fields in dict format per section 3.1 of spec.
     """
-    ns = 'http://salmon-protocol.org/ns/magic-env'
+    encoding = None
+    if mime_type == 'application/atom+xml':
+        d = et.ElementTree()
+        d._setroot(et.XML(textinput.strip()))
 
-    # TODO(jpanzer): Support JSON format, do real sanity checks against
-    # mime type
-    d = et.ElementTree()
-    d._setroot(et.XML(textinput.strip()))
+        if d.getroot().tag == _ATOM_NS+'feed':
+            d._setroot(d.find(_ATOM_NS+'entry'))
 
-    if d.getroot().tag == _ATOM_NS+'feed':
-        d._setroot(d.find(_ATOM_NS+'entry'))
+        data_el = None
+        if d.getroot().tag == _ATOM_NS+'entry':
+          for el in d.findall(_ATOM_NS+'link'):
+              if el.get('rel').split(' ').count('alternate') > 0 \
+                 and el.get('type') == 'application/pgp-encrypted':
+                  data_el = el
+                  break
+        else:
+          raise ValueError('Unrecognized input format')
 
-    data_el = None
-    if d.getroot().tag == _ATOM_NS+'entry':
-      for el in d.findall(_ATOM_NS+'link'):
-          if el.get('rel').split(' ').count('alternate') > 0:
-              data_el = el
-              break
+        encoding = 'rfc2397'
+        data = data_el.get('href')
+    elif mime_type == 'application/pgp-encrypted': # Raw binary OpenPGP
+        encoding = 'raw'
+        data = textinput
     else:
-      raise ValueError('Unrecognized input format')
+        raise ValueError('Unrecognized input format')
 
-    def Squeeze(s):  # Remove all whitespace
-      return re.sub(_WHITESPACE_RE, '', s)
-
-    # Pull magic envelope fields out into dict. Don't forget
-    # to remove leading and trailing whitepace from each field's
-    # data.
-    # TODO pull from actual PGP data once we're encoding that
-    return dict (
-        data=Squeeze(data_el.get('href').split('|',1)[0]),
-        encoding='rfc2397',
-        data_type=data_el.get('type'),
-        alg='RSA-SHA256',
-        sig=Squeeze(data_el.get('href').split('|',1)[1]),
-    )
-
+    m = OpenPGP.Message.parse(self.DecodeData(data, encoding))
+    logging.error(m._packets)
+    signature_packet, data_packet = m.signature_and_data()
+    return ({'encoding': encoding,
+            'algorithm': signature_packet.key_algorithm_name() \
+            + '-' + signature_packet.hash_algorithm_name(),
+            'data_type': data_packet.filename,
+            'sig': data,
+            'data': data_packet.data})
 
 class EnvelopeError(Error):
   """Error thrown on failure to initialize an Envelope."""
@@ -448,16 +440,14 @@ class Envelope(object):
 
       self._parsed_data = self._protocol.ParseData(raw_data,
                                                    self._data_type)
-      self._data = self._protocol.EncodeData(raw_data,
-                                             self._encoding,
-                                             self._mime_type)
+      self._data = raw_data
       self._signer_uri = kwargs['signer_uri']
       self._signer_key = kwargs['signer_key']
     elif self._sig:
       # If passed a signature, the envelope goes into verify mode.
       if not self._data:
         raise EnvelopeError(self, 'No data to verify')
-      raw_data = self._protocol.DecodeData(self._data, self._encoding)
+      raw_data = self._data # data with signatures is not encoded
     else:
       # No raw data and no signature, give up.
       raise EnvelopeError(self, 'Insufficient data to initialize envelope.')
@@ -481,15 +471,14 @@ class Envelope(object):
     assert self._signer_key
     assert self._protocol.IsAllowedSigner(self._parsed_data, self._signer_uri)
 
-    signature_alg = self._protocol.GetSigningAlg(self._signer_key)
-    self._sig = self._protocol.EncodeData(signature_alg.Sign(self._data),
-                    self._encoding)
-    self._alg = signature_alg.GetName()
+    alg = self._protocol.GetSigningAlg(self._signer_key)
+    packet = OpenPGP.LiteralDataPacket(self._data, 'u', self._data_type)
+    self._sig = self._protocol.EncodeData(alg.sign(packet).to_bytes(),
+                    self._encoding, 'application/pgp-encrypted')
 
     # Hmm.  This seems like a no-brainer assert but what if you're
     # signing something with a not-yet-published public key?
-    assert signature_alg.Verify(self._data,
-               self._protocol.DecodeData(self._sig, self._encoding))
+    assert alg.verify(self._protocol.DecodeData(self._sig, self._encoding))
 
     # TODO(jpanzer): Clear private key data from object?
 
@@ -497,8 +486,7 @@ class Envelope(object):
     """Performs signature verification on parsed data."""
     # Decode data to text, cache parsed representation,
     # and find the key to use:
-    text = self._protocol.DecodeData(self._data.encode('utf-8'), self._encoding)
-    self._parsed_data = self._protocol.ParseData(text, self._data_type)
+    self._parsed_data = self._protocol.ParseData(self._data, self._data_type)
     self._signer_uri = self._protocol.GetSignerURI(self._parsed_data)
     self._signer_public_key = self._protocol.GetPublicKey(self._signer_uri)
 
@@ -538,13 +526,11 @@ class Envelope(object):
     template += """
 <feed xmlns="http://www.w3.org/2005/Atom">
   <entry>
-    <link type="%s" rel="alternate" href="%s|%s" />
+    <link type="application/pgp-encrypted" rel="alternate" href="%s" />
   </entry>
 </feed>
 """
-    text = template % (self._mime_type,
-                       self._data,
-                       self._sig)
+    text = template % self._sig
     indented_text = ''
     for line in text.strip().split('\n'):
       indented_text += ' '*indentation + line + '\n'
@@ -569,10 +555,10 @@ class Envelope(object):
 
     # Create a provenance and add it in.
     data_el = et.Element(_ATOM_NS+'link')
-    data_el.set('type', self._data_type)
+    data_el.set('type', 'application/pgp-encrypted')
     data_el.set('rel', 'alternate')
-    data_el.set('href', self._data + '|' + \
-                self._protocol.EncodeData(self._sig, self._encoding))
+    data_el.set('href', self._protocol.EncodeData(self._sig, 'rfc2397', \
+                'application/pgp-encrypted'))
 
     # Add in the provenance element:
     d.getroot().append(data_el)
